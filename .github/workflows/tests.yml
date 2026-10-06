@@ -1,14 +1,3 @@
-# 注意：这个文件是给 GitHub Actions 用的工作流，但当前用于推送的
-# Personal Access Token 没有 `workflow` 权限，无法直接写入
-# .github/workflows/。启用方式（任选其一）：
-#   1. 给 token 加上 `workflow` scope 后执行：
-#        mkdir -p .github/workflows
-#        git mv ci/github-actions-tests.yml .github/workflows/tests.yml
-#        git commit -m "启用 CI" && git push
-#   2. 或用网页版 GitHub 在 .github/workflows/ 下新建同名文件，粘贴本文件内容。
-# 在启用之前，测试请本地运行：
-#   python3 tests/selftest.py && python3 tests/ec_sim_test.py && python3 tests/integration_test.py
-
 name: tests
 
 on:

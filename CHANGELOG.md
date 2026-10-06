@@ -29,9 +29,8 @@
   全程保留，结束后**无条件恢复**原值（`finally` 中做，`Ctrl-C` 亦然）。
 - **`tools/diag-acpi.sh`**：root 诊断脚本，含上述对照实验、逐候选路径试调、
   以及 DSDT 反汇编以定位 `ECRR` 的真实归属。
-- **CI 工作流**：在 Python 3.9–3.13 上运行三套测试与 shell 语法检查。
-  因推送所用 token 缺 `workflow` 权限，暂存于 `ci/github-actions-tests.yml`，
-  启用方式见该文件顶部说明。
+- **CI**：`.github/workflows/tests.yml` 在 Python 3.9–3.13 上运行三套测试，
+  并做 shell 语法检查。
 
 ### 修复（部署）
 
