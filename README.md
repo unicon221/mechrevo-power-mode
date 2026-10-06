@@ -1,7 +1,8 @@
 # MECHREVO 翼龙15Pro (GM5HG0A) 性能模式按键修复
 
-[![tests](https://github.com/unicon221/mechrevo-power-mode/actions/workflows/tests.yml/badge.svg)](https://github.com/unicon221/mechrevo-power-mode/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![tests](https://img.shields.io/badge/tests-212%20assertions%20passing-brightgreen)
+![platform](https://img.shields.io/badge/platform-Arch%20Linux%20%7C%20systemd-blue)
 
 让电源键旁边的 **办公 / 均衡 / 狂暴** 键真正生效，**且不依赖任何桌面环境**
 （KDE、GNOME、Sway、Hyprland、Xfce 乃至纯 TTY 行为一致），
@@ -394,6 +395,11 @@ python3 tests/integration_test.py    #  10 项：主循环（用 FIFO 模拟输�
 `integration_test.py` 真的把 `main_loop` 跑起来，经历
 `select()` → `os.read()` → 拆包 → 触发切换 的完整路径，并覆盖
 "`acpi_call` 比守护进程晚就绪时会补做一次对齐"这一开机时序场景。
+
+> CI 工作流已写好但暂未启用，放在 `ci/github-actions-tests.yml`：
+> 推送所用的 Personal Access Token 缺少 `workflow` 权限，无法写入
+> `.github/workflows/`。想启用的话，按该文件顶部的说明把它移过去即可
+> （或给 token 加上 `workflow` scope）。在此之前请在本地跑上面三条命令。
 
 ## 六、文件说明
 
