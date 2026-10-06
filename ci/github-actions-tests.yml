@@ -1,0 +1,60 @@
+# 注意：这个文件是给 GitHub Actions 用的工作流，但当前用于推送的
+# Personal Access Token 没有 `workflow` 权限，无法直接写入
+# .github/workflows/。启用方式（任选其一）：
+#   1. 给 token 加上 `workflow` scope 后执行：
+#        mkdir -p .github/workflows
+#        git mv ci/github-actions-tests.yml .github/workflows/tests.yml
+#        git commit -m "启用 CI" && git push
+#   2. 或用网页版 GitHub 在 .github/workflows/ 下新建同名文件，粘贴本文件内容。
+# 在启用之前，测试请本地运行：
+#   python3 tests/selftest.py && python3 tests/ec_sim_test.py && python3 tests/integration_test.py
+
+name: tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ "3.9", "3.11", "3.12", "3.13" ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 语法检查
+        run: |
+          python -m py_compile mechrevo-keyd.py
+          python -m py_compile tests/selftest.py tests/ec_sim_test.py tests/integration_test.py
+
+      - name: 守护进程自测
+        run: python tests/selftest.py
+
+      - name: 指示灯写 EC 端到端模拟
+        run: python tests/ec_sim_test.py
+
+      - name: 主循环集成测试
+        run: python tests/integration_test.py
+
+      - name: shell 语法检查
+        run: |
+          bash -n install.sh
+          bash -n tools/diag-acpi.sh
+          bash -n tools/cycle-power-profile.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck --severity=error install.sh tools/*.sh || true

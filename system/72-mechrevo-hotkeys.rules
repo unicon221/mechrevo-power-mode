@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------------------
+# MECHREVO 翼龙15Pro (GM5HG0A) —— Uniwill WMI 热键设备访问规则
+#
+# 作用：让 seat 上的登录用户可以直接读取该输入设备。
+#
+# 为什么需要：该设备没有任何 uaccess 标签（udev 只给了 power-switch），
+# 普通用户打开 /dev/input/eventN 会 EACCES。
+#   - 守护进程以 root 运行，本身不依赖本规则；
+#   - 本规则的价值是让你可以用 `evtest`（无需 sudo）自行抓包验证按键，
+#     也便于将来改用用户级服务。
+#
+# 【文件名必须是 72-，不能是 99-】
+#   TAG+="uaccess" 本身不会创建 ACL；真正施加 ACL 的是
+#   /usr/lib/udev/rules.d/73-seat-late.rules 里的
+#       TAG=="uaccess|xaccess-*", ENV{MAJOR}!="", RUN{builtin}+="uaccess"
+#   该行在“规则执行到 73 的那一刻”判断 TAG 是否已含 uaccess。
+#   如果本规则排在 73 之后（例如 99-mechrevo-hotkeys.rules），
+#   TAG 设置得太晚，条件判定为假，ACL 永远不会被创建 ——
+#   规则静默失效。故使用 72-（在 73 之前，且不与系统的
+#   70-uaccess / 71-seat 编号冲突）。
+# ---------------------------------------------------------------------------
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
+    ATTRS{name}=="Uniwill WMI hotkeys", TAG+="uaccess"

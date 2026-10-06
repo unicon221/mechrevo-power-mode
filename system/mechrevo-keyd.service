@@ -1,0 +1,42 @@
+[Unit]
+Description=MECHREVO 性能模式按键守护进程 (Uniwill WMI hotkeys -> power profile)
+Documentation=file:/usr/local/share/doc/mechrevo-power-mode/README.md
+# 输入设备与 PPD 都可能在启动后才就绪；Restart=always 会自动接管
+After=multi-user.target power-profiles-daemon.service systemd-modules-load.service
+Wants=power-profiles-daemon.service
+# acpi_call 由 modules-load.d 在 systemd-modules-load.service 里加载。
+# 排到它之后，启动时那次"指示灯对齐"才能看到 /proc/acpi/call；
+# 否则开机首次同步会静默跳过（按键仍然正常，因为每次都会重新检查）。
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mechrevo-keyd
+Restart=always
+RestartSec=3
+
+# ---- 安全加固（本服务只读输入设备 + 写 platform_profile + 调 D-Bus）----
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+# 注意：不能开启 ProtectKernelTunables，否则 /sys 只读，
+# 退化路径（直接写 /sys/firmware/acpi/platform_profile）会失败。
+ProtectKernelTunables=no
+
+# 模式指示灯需要写 /proc/acpi/call（acpi_call 内核模块提供的接口）。
+# 它不直接碰硬件端口，只是让内核代为执行平台设备 \_SB_.INOU 上的
+# ACPI ECRW/ECRR 方法 —— 与 uniwill_laptop 驱动内部走的是同一条通路。
+# /proc 不受 ProtectSystem 管辖，所以无需额外放开；也无需 CAP_SYS_RAWIO。
+# 未安装/未加载 acpi_call 时本程序自动跳过该功能，只切换电源模式。
+# 若安装了 acpi_call 但想让本服务看到它，确保模块在服务启动前已加载：
+#   echo acpi_call > /etc/modules-load.d/acpi_call.conf
+
+[Install]
+WantedBy=multi-user.target

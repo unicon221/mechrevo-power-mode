@@ -1,0 +1,17 @@
+# Python 产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本机固件转储：由 tools/diag-acpi.sh 生成，含本机序列号/UUID 等信息，
+# 属于个人机器数据，不入库。需要时自行运行脚本重新生成。
+dsdt.dsl
+dsdt.aml
+*.dsl.tmp
+
+# 编辑器 / 系统
+*.swp
+*~
+.vscode/
+.idea/
+.DS_Store
