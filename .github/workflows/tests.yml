@@ -14,10 +14,10 @@ jobs:
       matrix:
         python-version: [ "3.9", "3.11", "3.12", "3.13" ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -44,6 +44,16 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: ShellCheck
-        run: shellcheck --severity=error install.sh tools/*.sh || true
+        # ubuntu-latest 自带 shellcheck，无需安装。
+        # 只把 error 级别当失败；已核实三个脚本在 error 与 warning 级别均为 0 问题。
+        run: shellcheck --severity=error install.sh tools/*.sh
+      - name: 确认仓库里没有构建产物 / 本机固件转储
+        run: |
+          if git ls-files | grep -qE '(__pycache__|\.pyc$|dsdt\.(dsl|aml)$)'; then
+            echo "::error::仓库里不应包含构建产物或本机固件转储"
+            git ls-files | grep -E '(__pycache__|\.pyc$|dsdt\.)'
+            exit 1
+          fi
+          echo "OK: 无构建产物 / 固件转储"
