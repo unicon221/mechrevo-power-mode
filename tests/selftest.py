@@ -328,7 +328,9 @@ _dmesg_log = []
 def _fake_dmesg(limit=15):
     return list(_dmesg_log) if limit is None else _dmesg_log[-limit:]
 keyd._recent_acpi_call_dmesg = _fake_dmesg
+_ctl_invocations = []                     # 记录本组的每一次 acpi_call
 def _ctl_call(inv):
+    _ctl_invocations.append(inv)
     if "STA" in inv:
         return "0xB"                      # 正面对照：必然存在的 _STA
     if "NOSUCHTHING" in inv:
@@ -342,8 +344,14 @@ with contextlib.redirect_stdout(_buf):
     _rc = keyd.probe()
 _out = _buf.getvalue()
 check("probe 返回 1", _rc, 1)
-check("列出了每个候选作用域的原始返回",
-      _out.count("AE_NOT_FOUND") >= len(keyd._EC_SCOPES), True)
+# 诊断输出必须把**每个真正试过的候选路径**都列出来；同时核对调用次数，
+# 确认确实逐个试过（而不是只打印了列表）。
+_cand_paths = [keyd._method_path(s, "ECRR") for s in keyd._candidate_scopes()]
+check("列出了每个候选作用域",
+      all(p in _out for p in _cand_paths), True)
+_ecrr_calls = [i for i in _ctl_invocations if "ECRR" in i]
+check("确实逐个试了这些候选",
+      sorted(_ecrr_calls), sorted(f"{p} 0x0740" for p in _cand_paths))
 check("判定为路径问题（对照实验生效）", "通路**完全正常**" in _out, True)
 check("提示了 diag-acpi.sh", "diag-acpi.sh" in _out, True)
 check("打印了版本号，便于确认跑的是哪一版", keyd.VERSION in _out, True)
@@ -522,6 +530,112 @@ check("无 acpi_call 时返回 1", _rc4, 1)
 keyd.ec_read = REAL["ec_read"]
 keyd.ec_write = REAL["ec_write"]
 keyd.ec_available = REAL["ec_available"]
+keyd._ec_scope_cache = None
+
+print("\n== 23) 作用域探测不得自己制造 dmesg 噪音 ==")
+# 回归背景：acpi_call 在路径不存在时会用 KERN_ERR 往内核日志打
+# "Cannot get handle"。原实现有两处自造噪音：
+#   (a) 命中后仍把其余候选全部试完；
+#   (b) 候选表里有 ACPI 意义上的重复名（\_SB 与 \_SB_ 是同一对象）。
+# 结果每次新进程启动都固定产生 3 条报错（5 个候选里 3 个不存在）。
+# 这几条断言把修复钉住。
+_real_dev_path23 = keyd._device_acpi_path
+_real_call23 = keyd._acpi_call
+_noise23 = []                             # 模拟被 acpi_call 打进内核日志的报错
+_calls23 = []
+
+
+def _probe_call23(inv):
+    _calls23.append(inv)
+    path = inv.split()[0]
+    if keyd._acpi_name_key(path) == "\\_SB_.INOU.ECRR":
+        return "0x19"
+    _noise23.append(f"Cannot get handle: {path}")   # 错误路径必然报错
+    return "Error: AE_NOT_FOUND"
+
+
+# 本机真实情况：sysfs 能给出权威路径 \_SB_.INOU
+keyd._device_acpi_path = lambda: "\\_SB_.INOU"
+keyd._acpi_call = _probe_call23
+keyd._ec_scope_cache = None
+_found23, _ = keyd.discover_ec()
+check("健康机型能一次命中权威路径", _found23, "\\_SB_.INOU")
+check("健康机型产生的内核报错数为 0", len(_noise23), 0)
+check("健康机型只发一次调用", len(_calls23), 1)
+
+# 即使 sysfs 不可用（回退表），也必须命中即停、且不重复试同一对象
+keyd._device_acpi_path = lambda: None
+keyd._ec_scope_cache = None
+_noise23.clear()
+_calls23.clear()
+_found23b, _ = keyd.discover_ec()
+check("sysfs 不可用时仍能命中", _found23b, "\\_SB_.INOU")
+check("sysfs 不可用时不重复试同一 ACPI 对象", len(_calls23), 1)
+check("sysfs 不可用时也不产生报错", len(_noise23), 0)
+
+# 候选表内部必须无 ACPI 意义上的重复
+_keys23 = [keyd._acpi_name_key(s) for s in keyd._candidate_scopes()]
+check("候选表已按 ACPI 名字去重", len(_keys23), len(set(_keys23)))
+
+# 全部候选都不通时（换机型/换 BIOS），报错数应等于**去重后的候选数**，
+# 而不是原始写法数——这是"不重复报错"的量化表达。
+keyd._device_acpi_path = lambda: None
+keyd._acpi_call = lambda inv: (_noise23.append(inv) or "Error: AE_NOT_FOUND")
+keyd._ec_scope_cache = None
+_noise23.clear()
+_found23c, _ = keyd.discover_ec()
+check("全不通时返回 None", _found23c, None)
+check("全不通时报错数 = 去重后的候选数",
+      len(_noise23), len(keyd._candidate_scopes()))
+check("全不通时报错数少于旧实现的 5 个候选", len(_noise23) < 5, True)
+
+# 还原
+keyd._device_acpi_path = _real_dev_path23
+keyd._acpi_call = _real_call23
+keyd._ec_scope_cache = None
+
+print("\n== 23b) 探测结论必须写入缓存（否则报错数翻倍）==")
+# 回归背景：discover_ec() 原先**不写** _ec_scope_cache，而 probe() 会先调它、
+# 紧接着又调 _ec_scope()——后者发现缓存为空就再探测一遍。真机日志里那几组
+# 6 条（= 3 条 × 2 次）报错正是这么来的。
+_real_dev23b = keyd._device_acpi_path
+_real_call23b = keyd._acpi_call
+_calls23b = []
+
+
+def _call23b(inv):
+    _calls23b.append(inv)
+    p = inv.split()[0]
+    return ("0x19\x00" if keyd._acpi_name_key(p) == "\\_SB_.INOU.ECRR"
+            else "Error: AE_NOT_FOUND")
+
+
+keyd._device_acpi_path = lambda: "\\_SB_.INOU"
+keyd._acpi_call = _call23b
+keyd._ec_scope_cache = None
+_found23b, _ = keyd.discover_ec()
+_n_after_discover = len(_calls23b)
+check("探测一次即命中", _n_after_discover, 1)
+check("discover_ec 命中后写入缓存", keyd._ec_scope_cache, "\\_SB_.INOU")
+keyd._ec_scope()
+check("discover_ec 之后 _ec_scope() 不再重复探测",
+      len(_calls23b) - _n_after_discover, 0)
+check("_ec_scope() 返回缓存中的作用域", keyd._ec_scope(), "\\_SB_.INOU")
+
+# 探测失败时也要写缓存（写空串），否则每次问都会重新试一遍
+keyd._ec_scope_cache = None
+keyd._acpi_call = lambda inv: (_calls23b.append(inv) or "Error: AE_NOT_FOUND")
+keyd._device_acpi_path = lambda: None
+_calls23b.clear()
+_found23b2, _ = keyd.discover_ec()
+_n_fail = len(_calls23b)
+check("全部不通时也写入缓存（空串）", keyd._ec_scope_cache, "")
+keyd._ec_scope()
+check("失败结论被缓存，不重复探测", len(_calls23b), _n_fail)
+
+# 还原
+keyd._device_acpi_path = _real_dev23b
+keyd._acpi_call = _real_call23b
 keyd._ec_scope_cache = None
 
 print()

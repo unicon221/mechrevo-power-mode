@@ -368,6 +368,69 @@ sudo mechrevo-keyd --set-led performance     # 期望紫灯
 sudo mechrevo-keyd --sync-led
 ```
 
+#### 5.4 dmesg 里的 ACPI 报错：哪些是本程序造成的，哪些不是
+
+`dmesg`/`journalctl -k` 里能看到几类 ACPI 报错。**必须分开看**，因为其中一类
+是本程序早期版本自己制造的：
+
+| 报错 | 来源 | 能否修 |
+|---|---|---|
+| `acpi_call: Cannot get handle: AE_NOT_FOUND` | **本程序**（1.4 及更早） | ✅ 1.5 已修，见下 |
+| `ACPI BIOS Error (bug): Could not resolve symbol [\_SB.ACDC.RTAC]`<br>`ACPI Error: Aborting method \_SB.PEP._DSM` | 固件（AMD UPEP SSDT） | ❌ 只能靠 DSDT 覆盖，见下 |
+| `ACPI BIOS Error (bug): Failure creating named object [...WLAN...]`<br>`AE_ALREADY_EXISTS` | 固件（重复定义） | ❌ 良性，见下 |
+| `acpi PNP0C02:01: Could not reserve [mem ...]` | 固件（AML 里重复声明了保留区） | ❌ 良性，见下 |
+
+**① 本程序造成的（1.5 已修）**
+
+`acpi_call` 在路径不存在时会用 `KERN_ERR` 往内核日志打一条
+`Cannot get handle`。1.4 及更早的实现有三处会**自己制造**这种报错：
+
+- 探测作用域时**命中后仍把其余候选全部试完**（没有 `break`）；
+- 候选表里有 ACPI 意义上的**重复名** —— ACPI 名字固定 4 字符、不足补
+  下划线，所以 `\_SB` 和 `\_SB_`、`\_SB.INOU` 和 `\_SB_.INOU` 是**同一个
+  对象**，重复试等于对同一个不存在的路径重复报错；
+- `discover_ec()` 探测完**不写缓存**，而 `--probe` 会先调它、紧接着又调
+  `_ec_scope()`，后者见缓存为空便**再探测一遍**，报错数直接翻倍
+  （日志里那几组 6 条 = 3 × 2 就是这么来的）。
+
+于是每次新进程启动会刷出 3~6 条 `Cannot get handle`。1.5 改为：
+优先读 sysfs 里内核自己给出的权威路径（`firmware_node/path`，即本机的
+`\_SB_.INOU`），按 ACPI 规范名去重、**命中即停**，并把探测结论**写入缓存**。
+健康机型上第一次调用就命中，**报错数从 3 降到 0**。可以用 `--probe -v`
+看到实际用的是哪个作用域。
+
+**② 固件自身的（改不了，但基本无害）**
+
+- `\_SB.ACDC.RTAC` 找不到 + `\_SB.PEP._DSM` 中止：只在**每次睡眠唤醒**时出现
+  一次。DSDT 里根本没有 `ACDC` 设备，是 AMD 的 `UPEP` SSDT 引用了不存在的
+  符号。实测不影响任何功能（电池、无线、亮度、调频、挂起恢复都正常）——
+  它就是一条无害的固件 bug 提示。
+- `AE_ALREADY_EXISTS`（`WLAN._DSM`、`GPP6._PRW` 等）：固件在不同表里把同一个
+  对象定义了两次，内核保留第一个、忽略后者。**良性**。
+- `PNP0C02:01: Could not reserve [mem 0xfec00000-...]`：AML 里重复声明了
+  这些保留区，内核发现已被占用于是放弃。**良性**，是 2020 年以前就已知的
+  固件写法问题。
+
+**想彻底消掉 ② 的话**，只有 DSDT 覆盖一条路（本机内核
+`CONFIG_ACPI_TABLE_UPGRADE=y`，条件具备）：
+
+```bash
+sudo pacman -S acpica                          # 提供 acpidump / iasl
+# 1) 导出并反汇编
+sudo acpidump -o tables.dat && sudo acpixtract -a tables.dat
+iasl -d dsdt.dat                               # 得到 dsdt.dsl
+# 2) 改掉出错的 AML（删除对 ACDC.RTAC 的引用、去掉重复定义）
+iasl -ve -tc dsdt.dsl                          # 重新编译成 dsdt.aml
+# 3) 让 initrd 带上它（Arch 用 mkinitcpio）
+#    /etc/mkinitcpio.conf: FILES=(... /path/to/dsdt.aml)，然后
+sudo mkinitcpio -P && sudo reboot
+```
+
+**但这不划算，也不建议**：要自己维护一份固件补丁、每次内核/BIOS 更新都可能
+失效，而且一旦 AML 改错，ACPI 初始化失败会导致**开不了机**（比现在这几条
+无害日志严重得多）。上面三类报错都不影响功能，建议**留着不动**；
+真正值得关心的只有第 ① 类，而它已经修好了。
+
 ### 6. 自测（不需要 root、不需要真设备）
 
 三套测试都在 `tests/` 下，共 **212 项断言**，全部不需要 root、不需要真设备：
@@ -467,6 +530,7 @@ mechrevo-power-mode/
 | **切档正常但灯不动** | 老进程是最常见原因（见上一行）。另外 `journalctl -u mechrevo-keyd \| grep 指示灯` 若**一行都没有**，说明运行中的进程里根本没有指示灯代码（旧版 `install.sh` 用 `enable --now`，服务已 active 时不会重启，现已改为显式 `restart` 并会在结尾校验进程新鲜度） |
 | 想看设备权限 | `getfacl /dev/input/by-path/platform-INOU0000:00-event`（应看到 `user:你的用户名:rw-`） |
 | 想看灯的日志 | `journalctl -u mechrevo-keyd \| grep 指示灯` |
+| **dmesg 里的 ACPI 报错** | 先分类：`acpi_call: Cannot get handle` 是本程序产生的（1.5 起应完全消失，若仍有请报 issue）；`ACDC.RTAC`/`PEP._DSM`、`AE_ALREADY_EXISTS`、`PNP0C02 Could not reserve` 都是固件自身的良性提示，详见 5.4 |
 
 常见临时处置：
 

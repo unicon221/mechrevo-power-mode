@@ -196,31 +196,62 @@ try:
     check("cycle() 返回 1", keyd.cycle(), 1)
     check("灯未被改动", ec.get(0x0751), 0x00)
 
-    print("\n== 9) ACPI 作用域自动探测（不同 acpi_call 写法容忍度不同）==")
-    # 模拟"只有省略 _SB_ 尾下划线的 \_SB.INOU 可用"的环境
-    keyd._ec_scope_cache = None
+    print("\n== 9) ACPI 作用域探测：sysfs 权威路径优先、命中即停、候选去重 ==")
+    # 历史背景：早先的实现把 5 个作用域写法全试一遍，而且**命中后仍继续试完**。
+    # 每个错误路径都会让 acpi_call 用 KERN_ERR 往内核日志里打一条
+    # "Cannot get handle"，于是每次启动都自己制造 dmesg 噪音。这三条断言
+    # 就是为了把这个回归钉住。
+    _real_dev_path = keyd._device_acpi_path
+    _real_acpi_call = keyd._acpi_call
     inv_seen = []
 
-    def only_sb_dot(inv):
+    def only_inou(inv):
+        """只有 \\_SB_.INOU.ECRR 读得通（按 ACPI 命名规则比较，故别名等价）。"""
         inv_seen.append(inv)
-        # 只有 \_SB.INOU.ECRR 能读通，其它一律找不到句柄
-        if inv.startswith("\\_SB.INOU.ECRR"):
+        path = inv.split()[0]                  # 去掉末尾的寄存器参数
+        if keyd._acpi_name_key(path) == "\\_SB_.INOU.ECRR":
             return "0x42"
         return "Error: AE_NOT_FOUND"
 
-    keyd._acpi_call = only_sb_dot
-    check("能选出可用作用域", keyd._ec_scope(), "\\_SB.INOU")
-    check("探测次数不超过候选数",
-          len(inv_seen) <= len(keyd._EC_SCOPES), True)
+    # (a) sysfs 能给出权威路径时：一次命中，零试错
+    keyd._device_acpi_path = lambda: "\\_SB_.INOU"
+    keyd._acpi_call = only_inou
+    keyd._ec_scope_cache = None
+    inv_seen.clear()
+    check("sysfs 权威路径被优先采用", keyd._ec_scope(), "\\_SB_.INOU")
+    check("命中即停：全程只发一次调用", len(inv_seen), 1)
+    check("这一次调用就是成功的那条路径",
+          keyd._acpi_name_key(inv_seen[0].split()[0]), "\\_SB_.INOU.ECRR")
+
+    # (b) 缓存生效：第二次不再探测
     n_before = len(inv_seen)
     keyd._ec_scope()
     check("第二次调用不再探测", len(inv_seen), n_before)
 
-    # 全部不通时必须优雅退回默认作用域，且不抛异常
+    # (c) sysfs 读不到时回退到候选表，且同样命中即停
+    keyd._device_acpi_path = lambda: None
+    keyd._ec_scope_cache = None
+    inv_seen.clear()
+    check("回退时仍能选出可用作用域", keyd._ec_scope(), "\\_SB_.INOU")
+    check("回退路径也只发一次调用", len(inv_seen), 1)
+
+    # (d) 候选表必须去重：ACPI 名字 4 字符补下划线，\\_SB 与 \\_SB_ 是同一对象
+    check("\\_SB 与 \\_SB_ 归一为同一名字",
+          keyd._acpi_name_key("\\_SB"), keyd._acpi_name_key("\\_SB_"))
+    check("\\_SB.INOU 与 \\_SB_.INOU 归一为同一名字",
+          keyd._acpi_name_key("\\_SB.INOU"),
+          keyd._acpi_name_key("\\_SB_.INOU"))
+    _cands = keyd._candidate_scopes()
+    _keys = [keyd._acpi_name_key(c) for c in _cands]
+    check("候选表内部无重复（同一对象不试两遍）", len(_keys), len(set(_keys)))
+
+    # (e) 全部不通时：失败被缓存，且优雅退回默认作用域、不抛异常
     keyd._ec_scope_cache = None
     keyd._acpi_call = lambda inv: "Error: AE_NOT_FOUND"
-    check("全不通时退回默认作用域", keyd._ec_scope(), keyd.ACPI_DEVICE)
+    check("全不通时退回默认作用域", keyd._ec_scope(), "\\_SB_.INOU")
     check("失败也会被缓存", keyd._ec_scope_cache, "")
+    keyd._device_acpi_path = _real_dev_path
+    keyd._acpi_call = _real_acpi_call
 
     # 根命名空间必须拼成 \ECRR，不能是 ".ECRR"
     check("根作用域拼出 \\ECRR", keyd._method_path("", "ECRR"), "\\ECRR")

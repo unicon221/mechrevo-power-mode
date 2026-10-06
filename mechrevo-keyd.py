@@ -116,7 +116,8 @@ ACPI_DEVICE = "\\_SB_.INOU"              # 本机平台设备 INOU0000:00 的 AC
 
 # 打印在 --probe/--status 里，方便确认跑的是哪一版（曾经因为装了旧版
 # 而误判过问题，加个版本号能省掉一整轮排查）。
-VERSION = "1.4-led"      # 1.4：修掉 acpi_call 返回值尾部 NUL 导致全部读数被判失败
+VERSION = "1.5-led"      # 1.5：作用域探测不再自造 dmesg 报错（sysfs 权威路径 + 去重 + 命中即停）
+                         # 1.4：修掉 acpi_call 返回值尾部 NUL 导致全部读数被判失败
 
 _PROFILE_ALIASES = {
     "power-saver": "power-saver",
@@ -256,17 +257,85 @@ def ec_available():
 # ACPI 解析相对名时会沿作用域链向上搜索，所以 ECRR 的真实位置是
 # \_SB_.INOU.ECRR、\_SB_.ECRR、\_ECRR 三者之一（不能更远）。
 # 而 acpi_call 只认**全限定路径**去 acpi_get_handle()，路径写错就报
-# "Cannot get handle"。因此这里把这三种祖先作用域都试一遍。
-_EC_SCOPES = [
-    "\\_SB_.INOU",   # 设备自身（firmware_node/path 显示的就是它）
-    "\\_SB.INOU",    # 同上，省略 _SB_ 尾下划线的写法
+# "Cannot get handle"。
+#
+# 注意这里**不是**盲试一大堆候选：路径写错时 acpi_call 会用 KERN_ERR 往内核
+# 日志里打一条 "Cannot get handle"，试错本身就是 dmesg 噪音。所以顺序是：
+#   1) 先读 sysfs 里内核自己给出的权威路径（firmware_node/path），它就是
+#      驱动调用 ECRR 时的基准作用域，健康机型一次命中、零报错；
+#   2) 再退回到去重后的少数几个祖先作用域，只在 sysfs 读不到时才用。
+#
+# 另外 ACPI 名字是「4 字符、不足补下划线」，所以 \_SB 与 \_SB_、
+# \_SB.INOU 与 \_SB_.INOU 在命名空间里**是同一个对象**。原先把这些写法
+# 全部列成候选，等于对同一个不存在的路径重复报错。这里统一归一化去重。
+_EC_FALLBACK_SCOPES = [
+    "\\_SB_.INOU",   # 设备自身（正常情况；也正是 sysfs 会给出的答案）
     "\\_SB_",        # 父作用域
-    "\\_SB",         # 同上，另一种写法
     "",              # 根命名空间 → \ECRR
 ]
 
+# 设备在 sysfs 里暴露 ACPI 路径的位置，按可靠性排序。
+_ACPI_PATH_FILES = [
+    "/sys/bus/acpi/devices/{dev}/firmware_node/path",
+    "/sys/bus/acpi/devices/{dev}/path",
+]
+_ACPI_DEVICE_ID = "INOU0000:00"   # 平台设备名（= ACPI_DEVICE 对应的实例）
+
 _last_raw = None         # 最近一次 acpi_call 的原始返回，用于诊断
 _ec_scope_cache = None   # None=未探测；""=探测过但都不通；否则=可用作用域
+
+
+def _acpi_name_key(path):
+    """把 ACPI 路径归一化成命名空间视角的规范名，用于去重。
+
+    ACPI 名字固定 4 字符，不足部分用 '_' 补齐，因此 `\\_SB` 和 `\\_SB_`
+    指向同一个对象、`\\_SB.INOU` 和 `\\_SB_.INOU` 也是。不归一化的话，
+    同一个不存在的路径会被当成多个候选、重复往内核日志里刷同样的报错。
+    """
+    if not path:
+        return "\\"
+    segs = [s for s in path.lstrip("\\").split(".") if s]
+    return "\\" + ".".join((s + "____")[:4] for s in segs)
+
+
+def _device_acpi_path():
+    """从 sysfs 读内核给出的本机 ACPI 设备路径（如 `\\_SB_.INOU`）。
+
+    这是最权威的答案：它正是内核绑驱动时用的那个 handle 对应的路径，
+    因此以它为作用域去调 ECRR 必然命中，不必试错、也就不会产生
+    "Cannot get handle" 噪音。读不到时返回 None，由调用方回退。
+    """
+    for tpl in _ACPI_PATH_FILES:
+        try:
+            with open(tpl.format(dev=_ACPI_DEVICE_ID), encoding="utf-8") as f:
+                p = _clean_reply(f.read())
+        except OSError:
+            continue
+        if p.startswith("\\"):
+            return p
+    return None
+
+
+def _candidate_scopes():
+    """给出待试的 ACPI 作用域，已按命名空间归一化去重。
+
+    sysfs 权威路径排第一；其余候选仅在它读不到时才有机会被用到。
+    """
+    out = []
+    seen = set()
+    for scope in ([_device_acpi_path()] + _EC_FALLBACK_SCOPES):
+        if scope is None:
+            continue
+        key = _acpi_name_key(scope)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(scope)
+    return out
+
+
+# 兼容旧名字：外部（含测试）可能引用过 _EC_SCOPES。
+_EC_SCOPES = _EC_FALLBACK_SCOPES
 
 
 def _method_path(scope, name):
@@ -342,15 +411,26 @@ def _classify(raw):
 
 
 def discover_ec(verbose=False):
-    """找出能用的 ACPI 作用域。返回 (作用域 or None, 诊断行列表)。"""
+    """找出能用的 ACPI 作用域。返回 (作用域 or None, 诊断行列表)。
+
+    设计要点：这是 dmesg 噪音的唯一来源，所以三条规则必须守住——
+      1) **命中即停**。原先命中后仍把其余候选全部试完，而每个错误路径都会让
+         acpi_call 打一条 "Cannot get handle"。健康机型上这是纯粹的自我噪音。
+      2) 候选**先去重**。ACPI 名字 4 字符补下划线，`\\_SB`／`\\_SB_` 等同名，
+         重复试等于对同一个不存在对象重复报错。
+      3) 探测结论**写入缓存**。原先不写，于是 `probe()` 先调本函数、紧接着
+         `_ec_scope()` 又因缓存为空**再探测一遍**，把报错数直接翻倍
+         （真机日志里那几组 6 条报错就是这么来的）。
+    """
+    global _ec_scope_cache
     lines = []
     found = None
-    for scope in _EC_SCOPES:
+    for scope in _candidate_scopes():
         path = _method_path(scope, "ECRR")
         raw = _acpi_call(f"{path} 0x0740")
         kind = _classify(raw)
         val = _parse_int(raw)
-        if val is not None and found is None:
+        if val is not None:
             found = scope
             shown = f"✔ 可读，0x0740 = 0x{val:02X}"
         elif kind == "nohandle":
@@ -370,17 +450,28 @@ def discover_ec(verbose=False):
         lines.append(f"    {path:<26} {shown}")
         if verbose:
             lines.append(f"      原始返回：{raw!r}")
+        if found is not None:
+            # 命中即停：后面的候选必然是错的，继续试只会往内核日志里
+            # 刷 "Cannot get handle"，属于自己制造 dmesg 噪音。
+            break
+    # 把结论写进缓存，避免调用方随后再问一次作用域时重复整轮探测。
+    _ec_scope_cache = found if found is not None else ""
     return found, lines
 
 
 def _ec_scope():
-    """返回可用的 ACPI 作用域；结果缓存，探测失败时退回标准形式。"""
+    """返回可用的 ACPI 作用域；结果缓存，探测失败时退回 sysfs 权威路径。"""
     global _ec_scope_cache
     if _ec_scope_cache is not None:
-        return _ec_scope_cache or _EC_SCOPES[0]
+        return _ec_scope_cache or _default_scope()
     found, _ = discover_ec()
     _ec_scope_cache = found if found is not None else ""
-    return _ec_scope_cache or _EC_SCOPES[0]
+    return _ec_scope_cache or _default_scope()
+
+
+def _default_scope():
+    """探测失败时的兜底作用域：优先 sysfs 权威路径，其次设备自身写法。"""
+    return _device_acpi_path() or _EC_FALLBACK_SCOPES[0]
 
 
 def control_test():
