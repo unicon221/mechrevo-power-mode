@@ -106,11 +106,14 @@ else
 
     echo
     echo "  --- 2d) 逐个候选路径真实调用（探针寄存器 0x0740）---"
+    # 注意：ACPI 名字固定 4 字符、不足补下划线，所以 \_SB 与 \_SB_、
+    # \_SB.INOU 与 \_SB_.INOU 在命名空间里是**同一个对象**。旧表把同义写法
+    # 当成不同候选，会对同一不存在的路径重复试调、重复刷 "Cannot get handle"，
+    # 而这个脚本本来就是用来排查 dmesg 噪音的。这里只保留规范写法（带下划线），
+    # 与守护进程 1.5 的候选去重保持一致。
     for path in \
         '\_SB_.INOU.ECRR' \
-        '\_SB.INOU.ECRR' \
         '\_SB_.ECRR' \
-        '\_SB.ECRR' \
         '\ECRR' \
         '\_SB_.INOU.ECRW'
         do

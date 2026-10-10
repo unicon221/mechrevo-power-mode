@@ -304,28 +304,29 @@ if systemctl is-active --quiet mechrevo-keyd.service; then
     # 文件一致不代表进程一致 —— systemd 只在启动时读一次脚本，
     # 之后替换文件对已在运行的进程毫无影响（曾因此误判一整轮）。
     #
-    # 判据：进程已运行秒数 > 脚本被修改后经过的秒数
-    #       => 进程启动得比脚本更新还早 => 跑的是旧代码。
-    # 进程年龄用 systemd 的单调时钟（ExecMainStartTimestampMonotonic，微秒）
-    # 减 /proc/uptime 算，不依赖 ps 或 /proc/<pid>（沙箱/隐藏 pid 下可能是空的）。
+    # 判据：进程启动时刻早于脚本写入时刻超过 2 秒 => 进程跑的是旧代码。
+    # 两边都用**同一把墙钟**的绝对时刻做差，不再谈“年龄”：
+    #   进程启动时刻 = /proc/<pid> 目录的 mtime（内核把它设为进程启动时间）
+    #   脚本写入时刻 = 文件 mtime
+    # 曾经用 /proc/uptime 减 systemd 的 ExecMainStartTimestampMonotonic 来算
+    # “年龄”，但前者是 CLOCK_BOOTTIME（含挂起时间）、后者是 CLOCK_MONOTONIC
+    # （不含），笔记本睡过一觉后进程年龄会虚高出一个“累计挂起时长”，
+    # 于是刚重启的健康进程被误判成旧代码。
     SVC_PID="$(systemctl show -p MainPID --value mechrevo-keyd.service 2>/dev/null)"
-    SVC_START_US="$(systemctl show -p ExecMainStartTimestampMonotonic --value \
-                    mechrevo-keyd.service 2>/dev/null)"
     FILE_MTIME="$(stat -c %Y "$DAEMON_BIN" 2>/dev/null)"
-    if [[ "$SVC_START_US" =~ ^[0-9]+$ && "$SVC_START_US" -gt 0 \
-          && "$FILE_MTIME" =~ ^[0-9]+$ ]]; then
-        UPTIME_US="$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)"
-        PROC_AGE=$(( (UPTIME_US - SVC_START_US) / 1000000 ))
-        FILE_AGE=$(( $(date +%s) - FILE_MTIME ))
-        if (( PROC_AGE > FILE_AGE + 2 )); then
-            echo "[!!]  守护进程(PID $SVC_PID)已运行 ${PROC_AGE}s，而脚本是 ${FILE_AGE}s 前更新的"
+    PROC_START="$(stat -c %Y "/proc/${SVC_PID:-x}" 2>/dev/null)"
+    if [[ "$SVC_PID" =~ ^[0-9]+$ && "$SVC_PID" -gt 0 \
+          && "$PROC_START" =~ ^[0-9]+$ && "$FILE_MTIME" =~ ^[0-9]+$ ]]; then
+        if (( PROC_START < FILE_MTIME - 2 )); then
+            echo "[!!]  守护进程(PID $SVC_PID)启动于 $(date -d "@$PROC_START" '+%F %T')，"
+            echo "       早于脚本更新时间 $(date -d "@$FILE_MTIME" '+%F %T')"
             echo "        => 进程很可能仍在跑旧代码，请执行："
             echo "             sudo systemctl restart mechrevo-keyd"
         else
             echo "[OK]  守护进程(PID $SVC_PID)已加载最新脚本"
         fi
     else
-        echo "[--]  无法判定进程是否已重载（拿不到单调启动时刻），"
+        echo "[--]  无法判定进程是否已重载（拿不到进程启动时刻），"
         echo "        保险起见请执行： sudo systemctl restart mechrevo-keyd"
     fi
 else

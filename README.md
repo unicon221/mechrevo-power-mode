@@ -433,15 +433,15 @@ sudo mkinitcpio -P && sudo reboot
 
 ### 6. 自测（不需要 root、不需要真设备）
 
-三套测试都在 `tests/` 下，共 **212 项断言**，全部不需要 root、不需要真设备：
+三套测试都在 `tests/` 下，共 **235 项断言**，全部不需要 root、不需要真设备：
 
 ```bash
-python3 tests/selftest.py            # 165 项：解析、循环、--probe、--scan-led
-python3 tests/ec_sim_test.py         #  37 项：写 EC 的完整链路（含调用字符串格式）
+python3 tests/selftest.py            # 182 项：解析、循环、--probe、--scan-led
+python3 tests/ec_sim_test.py         #  43 项：写 EC 的完整链路（含调用字符串格式）
 python3 tests/integration_test.py    #  10 项：主循环（用 FIFO 模拟输入设备）
 ```
 
-`selftest.py` 用合成输入事件覆盖了 23 组、165 项断言：`struct` 布局、只认
+`selftest.py` 用合成输入事件覆盖了 23 组、182 项断言：`struct` 布局、只认
 `KEY_F14`/`value==1`、一次读取多个事件、跨 `read` 边界的残包、三档循环、
 未知档位回退、写失败返回码、名称映射、图标名有效性；
 以及指示灯部分的**读-改-写不破坏无关位**（逐个验证 `0x40` 全速风扇位与
@@ -471,8 +471,8 @@ python3 tests/integration_test.py    #  10 项：主循环（用 FIFO 模拟输�
 | `system/uniwill-laptop.conf` | 开机自动加载模块 |
 | `tools/cycle-power-profile.sh` | 可选的命令行小工具；安装守护进程后**并非必需** |
 | `tools/diag-acpi.sh` | **root** 诊断脚本：对照实验 + 逐路径试调 + 反汇编 DSDT 定位 `ECRR` 归属 |
-| `tests/selftest.py` | 守护进程自测（23 组 / 165 项断言） |
-| `tests/ec_sim_test.py` | 指示灯写 EC 的端到端模拟测试（37 项断言，模拟端点照抄内核的尾部 NUL 行为） |
+| `tests/selftest.py` | 守护进程自测（23 组 / 182 项断言） |
+| `tests/ec_sim_test.py` | 指示灯写 EC 的端到端模拟测试（43 项断言，模拟端点照抄内核的尾部 NUL 行为） |
 | `tests/integration_test.py` | 主循环集成测试（用 FIFO 模拟输入设备，10 项断言，含 acpi_call 晚就绪的补对齐） |
 
 目录结构：
